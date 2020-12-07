@@ -1,0 +1,580 @@
+---
+title: "Modeling Covid-19 at Eastern"
+output: html_document
+---
+
+```{r,echo=FALSE, include=FALSE}
+library(EpiModel)
+library(ggplot2)
+library(writexl)
+library(tidyverse)
+library(ggplot2)
+library(lattice)
+library(gridExtra)
+
+SEIQHFR <- function(t, t0, params){
+  with (as.list(c(t0,params)),{
+    
+    days = t 
+    t.prop = ifelse(t%%q.freq==0, t.prop,0)
+    
+  
+    num = s.num + e.num + i.num + q.num + h.num + r.num +f.num
+    t.num = s.num + e.num + i.num 
+    #ce is the number of people that an infected person infects per unit time 
+    ce <- R0/i.dur
+    #ce <- .25
+    #Lambda corresponds to the proportion of people who become infected per unit time 
+    lambda <- ce * i.num/num
+    #cat(t,"\n")
+    #dS = Susceptible Individuals
+    dS <- -lambda*s.num
+    #dE = exposed (but not infectious) individuals
+    dE <- (lambda*s.num) - ((1/e.dur)*e.num)
+    #dI = Infected/infectious individuals
+    dI <- ((1/e.dur)*e.num) - ((1/i.dur)*i.num) - (h.rate*i.num) - (t.num *t.prop*(i.num/t.num))  #Change qr
+    #dQ = quarantined individuals
+    #S.num = 80, e.num = 16, and i.num = 4, num = 100
+    #tested number = 25, positive test = 1
+    #t.num * q.rate * (i.num/t.num) t.num = (s.num + i.num + e.num)
+    #dQ <- ((i.num*qr)-((1/q.time)*q.num)) - (h.rate * q.num)
+    dQ <- (t.num *t.prop*(i.num/t.num)) - ((1/q.time)*q.num) - (h.rate*q.num)
+    #dH = hospitalized individuals
+    dH <- ((i.num*h.rate) + (q.num * h.rate)) - ((1/h.dur)*h.num) - (h.num * cfr)
+    #dF = Case Fatalities 
+    dF <- (h.num * cfr)
+    #Recovered Individuals 
+    dR <- ((1/i.dur)*i.num) + ((1/q.time)*q.num) + ((1/h.dur)*h.num) - (h.num * cfr)
+    #dR <- ((1/q.time)*q.num) + ((1/h.dur)*h.num) - (h.num * cfr)
+    
+    list(c(dS,dE,dI,dQ,dH,dF,dR))
+  }) 
+}
+
+```
+
+#### Introduction to DCMs
+
+In order to model Covid-19 on campus we introduce the idea of a Determanistic, Compartment Model (DCM).  DCM's are frequently used to model epidemics over a continuous period of time.  Deterministic means that results come from defined mathematical equations based off a number of defined parameters.  A DCM does not account for variability in a disease and instead display average results. As displayed below DCM's are compartmental because individuals are split into different categories and can move from one compartment to the next (an individual cannot be in multiple compartments at once).  One of the most basic DCM's is the SIR model which allows individuals to fall into three categories:
+
+* S - Susceptible
+* I - Infected
+* R - Recovered
+
+A basic SIR model is depicted below:
+![Modeling Disease Outbreaks[1]](C:/Fall2020/IndependentStudy/SIRmodel.png)
+
+
+#### The SEIQHFR Model
+
+As seen above the SIR model is good for giving a basic idea about how an epidemic is behaving.  However, this model only allows individuals to be classified as one of three categories (Susceptible,Infected, or Recovered) thus it is much to simplistic.  In order to effectively model Covid-19 we introduce the SEIQHFR model.   
+```{r out.width="50%", fig.align='center',echo=FALSE}
+knitr::include_graphics("/Fall2020/IndependentStudy/ReportImages/SEIQHFRModel.png")
+
+```
+Unlike the SIR model the SEIQHFR model has 6 compartments these being:
+
+* S - Susceptible
+* E - Exposed
+* I - Infected
+* Q - Quarantined
+* H - Requires hospitalisation
+* F - Case Fatality
+* R - Recovered 
+
+In the case of our model once an individual has moved on to another compartment they cannot go back.  For example if an individual is in the recovered compartment they cannot go back to susceptible or infected in that sense this model is unidirectional.  Additionally an individual must follow the designated path to get to one compartment to another. For example in our model an individual cannot be in the susceptible compartment and immediately jump to the quarantined compartment.   
+
+#### Model Parameters
+
+As stated above our model needs a defined set of parameters to calculate values. These parameters are defined in the table below and are based off Covid-19 Statistics in CT in addition to ECSU specific conditions:
+
+```{r, echo=FALSE}
+library(knitr)
+param = read.csv("/Fall2020/IndependentStudy/ModelParameters.csv")
+kable(param, caption = "Model Parameter Table")
+```
+
+There are three variables that can range in values these being R0, i.dur, and e.dur, these are the variables we will test first. R0 is defined as the number of individuals that an infected person will infect.  For example if R0 is set to 2 then an infected individual will infect 2 susceptible individuals.  i.dur is defined as the infected duration which is the period of time (in days) that an individual will be infected with Covid-19.  Additionally, in our model i.dur works to define how long it takes R0 to occur.  For example, if R0 is 2 and i.dur is 6 an infected person will infect 2 people over those 6 days.  Finally, e.dur is the exposed duration, the period where an individual has been exposed to the disease but is not infectious.  We estimate that this ranges once an exposed individual has been exposed for the duration of e.dur they will immediately become infectious. In addition to parameters our model need a set of initial conditions for the size of each compartment.
+
+```{r,echo=FALSE}
+library(knitr)
+init= read.csv("C:/Fall2020/IndependentStudy/initialConditions.csv")
+kable(init, caption = "Initial Conditions Table")
+```
+
+The initial conditions defined above are based off a number of factors. The total number of individuals (1600) is based on that there is are an estimated 1600 students who currently live on campus at ECSU. These conditions will be used for all of our model testing and the model will be run over 100 days.
+### Model Equations
+
+The number of individuals in each compartment for each time step in our model is defined by a series of differential equations that define how many individuals will be added or removed from their given compartment in addition to which individuals move to which compartment. These equations are defined as the following:
+
+* $\begin{aligned} \text{num} = \text{s.num + e.num + i.num + q.num + h.num + f.num + r.num } \end{aligned}$}
+    + **num** calculates the total number of individuals in the model
+* $\begin{aligned} \text{ce} = \frac{R0}{\text{i.dur}} \end{aligned}$
+    + **ce** calculates the number of contacts each day 
+* $\begin{aligned} \lambda = \text{ce} \cdot \frac{\text{i.num}}{\text{num}} \end{aligned}$
+    + $\lambda$ is essentially the force of the infection, as the number of infections increases $\lambda$
+    
+The equations differential equations defined below are respondible for moving individuals between compartments.
+
+* $\begin{aligned} dS = -\lambda \cdot \text{s.num} \end{aligned}$
+* $\begin{aligned} dE = (\lambda \cdot \text{s.num})- (\frac{\text{e.num}}{\text{e.dur}} ) \end{aligned}$
+* $\begin{aligned} dI = (\frac{\text{e.num}}{\text{e.dur}}) - (\frac{\text{i.num}}{\text{i.dur}}) - (\text{h.rate} \cdot \text{i.num}) - (\text{t.num} \cdot \text{t.prop} \cdot \frac{\text{i.num}}{\text{t.num}}) \end{aligned}$
+* $\begin{aligned} dQ = (\text{t.num} \cdot \text{t.prop} \cdot \frac{\text{i.num}}{\text{t.num}}) - (\frac{\text{q.num}}{\text{q.time}})-(\text{h.rate} \cdot \text{q.num}) \end{aligned}$
+* $\begin{aligned} dH = (\text{h.rate} \cdot \text{i.num})+(\text{h.rate}\cdot \text{q.num}) - (\frac{\text{h.num}}{\text{h.dur}}) - (\text{h.num} \cdot \text{cfr}) \end{aligned}$
+* $\begin{aligned} dF = \text{h.num} \cdot \text{cfr} \end{aligned}$
+* $\begin{aligned} dR = (\frac{\text{i.num}}{\text{i.dur}}) + (\frac{\text{q.num}}{\text{q.time}}) + (\frac{\text{h.num}}{\text{h.dur}}) - (\text{h.num} \cdot \text{cfr}) \end{aligned}$
+
+The article "Basic DCMs in Epimodel" [1] and "New DCMs with Epimodel" [2] give good explanations on how DCMs are built and how they function, note that both $\lambda$ and **ce** are defined from the equations given in "New DCMs with Epimodel"[2].  
+
+#### Model Results
+Below is an example of an SEIQHFR model, note that this model does not use the parameters defined above we just want to display what a SEIQHFR model looks like with all it's compartments
+```{r, echo=FALSE,fig.align='center'}
+#Total number of students = 1600
+#s.num = 1595, e.num = 5, i.num = 0
+param <- param.dcm(R0 = 20, i.dur=3,q.time=14,t.prop=.75,q.freq=4,h.rate=.05,h.dur=14, cfr=.001,e.dur=3)
+init <- init.dcm(s.num = 10000, e.num=100,i.num=100,q.num=0,h.num=0,f.num=0, r.num=0)
+control <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod<- dcm(param,init,control)
+mod.df <- as.data.frame(mod)
+
+plot1 <- ggplot(data=mod.df,aes(x=time))+
+  geom_line(aes(y= s.num),color="steelblue",size=1)+
+  geom_line(aes(y=e.num),color="forestgreen",size=1)+
+  geom_line(aes(y= i.num),color="gold",size=1)+
+  geom_line(aes(y= q.num),color="blueviolet",size=1)+
+  geom_line(aes(y= r.num),color="darkred",size=1)+
+  geom_line(aes(y= h.num),color="brown2",size=1)+
+  geom_line(aes(y= f.num),color="black",size=1)
+plot1 + xlab("Time in Days")+
+  ylab("Number of Individuals") + ggtitle("SEIQHFR Model")+theme_bw()
+  
+
+
+```
+
+
+SEIQHFR with varying R0
+
+We will first test how different R0 values impact the number of infected individuals. 
+```{r,echo=FALSE,include=FALSE}
+R0 <- c(1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0)
+
+##Test R0
+param.R0 <- param.dcm(R0 = R0, i.dur=7,q.time=14,t.prop=.25,q.freq=7,h.rate=.01,h.dur=14,
+                        cfr=.001,e.dur=3)
+
+init.R0 <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0,
+                      r.num=0)
+control.R0 <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod.R0 <- dcm(param.R0,init.R0,control.R0)
+mod.df.R0 <- as.data.frame(mod.R0)
+
+RUN.R0 <- split(mod.df.R0,mod.df.R0$run)
+
+for(i in seq(min(mod.df.R0$run),max(mod.df.R0$run))){
+  RUN.R0[[i]] <- tail(RUN.R0[[i]],n=1)
+  num.infected <- RUN.R0[[i]]$i.num + RUN.R0[[i]]$q.num + RUN.R0[[i]]$h.num + RUN.R0[[i]]$f.num + RUN.R0[[i]]$r.num
+  RUN.R0[[i]]$num.infected <- num.infected
+  num.infected <- 0
+}
+
+Run.R0 = c()
+numInfected.R0 = c()
+for(i in seq(min(mod.df.R0$run),max(mod.df.R0$run))){
+  Run.R0[i]<-RUN.R0[[i]]$run
+  numInfected.R0[i]<-RUN.R0[[i]]$num.infected
+}
+Run.R0
+numInfected.R0
+
+infected.R0 <- data.frame(Run.R0, numInfected.R0)
+infected.R0$R0 <- R0 
+infected.R0
+```
+
+```{r,fig.align='center',echo=FALSE}
+#R0 plot 
+
+infectedPlot.R0 <- ggplot(data=infected.R0,aes(x=Run.R0,y=numInfected.R0,fill=as.factor(R0)))+
+  geom_bar(stat="identity")+
+  ggtitle("R0 Impact on Total Infected")+
+  xlab("Run Number")+
+  ylab("Number of Infected Individuals")+
+  geom_text(aes(label=round(numInfected.R0,digits=2)), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=2.5)+
+  scale_fill_discrete(name = "R0 Value")+theme_bw()
+```
+
+Note that in the above graph the total number of infected individuals is calculated by taking the sum of i.num, r.num, q.num, h.num, and f.num on the last "day" of the simulation(day 100).  The reasoning for this is because in order for an individual to be in any of these categories they must have been infected at one point in time.  When analyzing the above graph we see that it gives fairly predictable results.  As R0 increases the number of infected 
+individuals increases.
+
+```{r,fig.align='center',echo=FALSE}
+infectedLine.R0 <- ggplot(data=mod.df.R0,aes(x=time,y=i.num,group = run))+
+  geom_line(aes(color = as.factor(run)))+
+  ggtitle("Num Infected vs R0")
+  
+infectedLine.R0 + scale_x_continuous(limits = c(0, 100))+scale_color_discrete(name="R0 Value",labels= c("1.1","1.2","1.3","1.4","1.5","1.6","1.7","1.8","1.9","2"))+theme_bw()
+```
+
+The above graph depicts how the i.num compartment changes over the 100 simulated days. The repeated drop of infected individuals every 7 days is likely due to the testing that occurs which removes individuals from this compartment.  Notice that as R0 increases the i.num compartment peaks earlier in the simulation.  This likely means that as R0 increases not only does the number of infected individuals increase but the disease will reach it's peak infection number quicker. 
+
+SEIQHFR with varying I.dur
+
+The i.dur parameter explains how long an individual will remain infectous.  We want to examine how varying this parameter will effect the total number of infected individuals.
+
+```{r,echo=FALSE,include=FALSE}
+iDur <- c(6,7,8)
+
+##Test iDur 
+param.iDur <- param.dcm(R0 = 1.5, i.dur=iDur,q.time=14,t.prop=.25,q.freq=7,h.rate=.01,h.dur=14,
+                        cfr=.001,e.dur=2)
+
+init.iDur <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0,
+                      r.num=0)
+control.iDur <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod.iDur <- dcm(param.iDur,init.iDur,control.iDur)
+mod.df.iDur <- as.data.frame(mod.iDur)
+
+RUN.iDur <- split(mod.df.iDur,mod.df.iDur$run)
+
+for(i in seq(min(mod.df.iDur$run),max(mod.df.iDur$run))){
+  RUN.iDur[[i]] <- tail(RUN.iDur[[i]],n=1)
+  num.infected <- RUN.iDur[[i]]$i.num + RUN.iDur[[i]]$q.num + RUN.iDur[[i]]$h.num + RUN.iDur[[i]]$f.num + RUN.iDur[[i]]$r.num
+  RUN.iDur[[i]]$num.infected <- num.infected
+  num.infected <- 0
+}
+
+Run.iDur = c()
+numInfected.iDur = c()
+for(i in seq(min(mod.df.iDur$run),max(mod.df.iDur$run))){
+  Run.iDur[i]<-RUN.iDur[[i]]$run
+  numInfected.iDur[i]<-RUN.iDur[[i]]$num.infected
+}
+
+infected.iDur <- data.frame(Run.iDur, numInfected.iDur)
+infected.iDur$iDur <- iDur 
+
+```
+
+```{r,fig.align='center',echo=FALSE}
+#iDur plot 
+infectedPlot.iDur <- ggplot(data=infected.iDur,aes(x=Run.iDur,y=numInfected.iDur,fill=as.factor(iDur)))+
+  geom_bar(stat="identity")+
+  ggtitle("iDur Impact on Total Infected")+
+  xlab("Run Number")+
+  ylab("Number of Infected Individuals")+
+  geom_text(aes(label=round(numInfected.iDur,digits=4)), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=2.5)+
+  scale_fill_discrete(name = "iDur Value")
+infectedPlot.iDur+theme_bw()
+```
+
+Interestingly as depicted in the graph above as i.dur increases the total number of infections decreases.  If we look at the equation for **ce** notice that **R0** is being divided by i.dur.  Understanding this relationship is necessary in order to understand the model.  If **R0** is 2 and **i.dur** is 7 an infectious individual will infect 2 people in 7 days.  However, if **i.dur** is 6 days then an individual will infect 2 people in 6 days instead of 7.  Therefore, the lower the **i.dur** value the higher the rate of infection and the lower the duration of infection.  If we examine how the number of infected individuals changes throughout the 100 days the model is run we should see a steeper graph that reaches its peak quicker and drops off quicker with a lower value for **i.dur**. On the other hand with a lower **i.dur** value we should see a less aggressive graph that takes longer to reach it's peak and drops off slower.  We will examine this in the figure below.
+
+```{r,fig.align='center',echo=FALSE}
+infectedLine.iDur <- ggplot(data = mod.df.iDur, aes(x=time,y = i.num))+
+  geom_line(aes(color = as.factor(run)))
+
+infectedLine.iDur +scale_color_discrete(name="i.dur Value",labels= c("6","7","8"))+theme_bw()
+
+```
+Note that our model was run over 100 days which appears to be to short of a time for the number of infections to drop off.  However, after examining this graph it is clear that a lower **i.dur** value indicates a more aggressive pandemic which reaches it's peak quicker as opposed to a lower **i.dur** value.  Theoretically if this model were to be run over a longer period of time the number of infections should be the same for all **i.dur** values.
+
+SEIQHFR with varying E.dur
+
+In our model **e.dur** indicates how long an individual is in an exposed state when coming into contact with the disease.  While exposed an individual is not immediately infectious but will be infectious after the given exposed duration.  
+
+```{r,echo=FALSE,include=FALSE}
+## Test e.Dur
+eDur <- c(2,3,4)
+
+param.eDur <- param.dcm(R0 = 1.5, i.dur=7,q.time=14,t.prop=.25,q.freq=7,h.rate=.01,h.dur=14,
+                   cfr=.001,e.dur=eDur)
+
+init.eDur <- init.dcm(s.num = 500, e.num=3,i.num=2,q.num=0,h.num=0,f.num=0,
+                 r.num=0)
+control.eDur <- control.dcm(nsteps=1000,dt=1, new.mod = SEIQHFR)
+mod.eDur <- dcm(param.eDur,init.eDur,control.eDur)
+mod.df.eDur <- as.data.frame(mod.eDur)
+
+RUN.eDur <- split(mod.df.eDur,mod.df.eDur$run)
+
+for(i in seq(min(mod.df.eDur$run),max(mod.df.eDur$run))){
+  RUN.eDur[[i]] <- tail(RUN.eDur[[i]],n=1)
+  num.infected <- RUN.eDur[[i]]$i.num + RUN.eDur[[i]]$q.num + RUN.eDur[[i]]$h.num + RUN.eDur[[i]]$f.num + RUN.eDur[[i]]$r.num
+  RUN.eDur[[i]]$num.infected <- num.infected
+  num.infected <- 0
+}
+
+Run.eDur = c()
+numInfected.eDur = c()
+for(i in seq(min(mod.df.eDur$run),max(mod.df.eDur$run))){
+  Run.eDur[i]<-RUN.eDur[[i]]$run
+  numInfected.eDur[i]<-RUN.eDur[[i]]$num.infected
+}
+
+infected.eDur <- data.frame(Run.eDur, numInfected.eDur)
+infected.eDur$eDur <- eDur 
+
+```
+```{r,echo=FALSE,fig.align='center'}
+#eDur plot 
+infectedPlot.eDur <- ggplot(data=infected.eDur,aes(x=Run.eDur,y=numInfected.eDur,fill=as.factor(eDur)))+
+  geom_bar(stat="identity")+
+  ggtitle("eDur Impact on Total Infected")+
+  xlab("Run Number")+
+  ylab("Number of Infected Individuals")+
+  geom_text(aes(label=round(numInfected.eDur,digits=4)), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=2.5)+
+  scale_fill_discrete(name = "eDur Value")
+infectedPlot.eDur+theme_bw()
+
+```
+After running our model on different values for e.dur (2,3,and 4) there does not appear to be a notable difference between the total number of infected individuals.  For the remainder of testing our model we will set **e.dur** to 3.
+
+**SEIQHFR model with varying R0 and i.dur**
+
+Having established that **e.dur** does not seem to have any impact of the model we will look at how **R0** and **i.dur** impact the model by running simulations using all possible combinations of these parameters.
+
+```{r,echo=FALSE,include=FALSE}
+#Run with all values R0 iDur 
+grid <- expand.grid(param1 = R0, param2 = iDur)
+grid.df <- as.data.frame(grid)
+
+#eDur does not seem to have much of an impact 
+R0.list <- grid$param1
+iDur.list <- grid$param2
+
+param.all <- param.dcm(R0 = R0.list, i.dur=iDur.list,q.time=14,t.prop=.25,q.freq=7,h.rate=.01,h.dur=14,
+                    cfr=.001,e.dur=3)
+
+init.all <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0,
+                  r.num=0)
+control.all <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+
+mod.all <- dcm(param.all,init.all,control.all)
+mod.df.all <- as.data.frame(mod.all)
+
+#Split runs calulate num.infected 
+RUN.all <- split(mod.df.all,mod.df.all$run)
+
+for(i in seq(min(mod.df.all$run),max(mod.df.all$run))){
+  RUN.all[[i]] <- tail(RUN.all[[i]],n=1)
+  num.infected <- RUN.all[[i]]$i.num + RUN.all[[i]]$q.num + RUN.all[[i]]$h.num + RUN.all[[i]]$f.num + RUN.all[[i]]$r.num
+  RUN.all[[i]]$num.infected <- num.infected
+  num.infected <- 0
+}
+
+Run.all = c()
+numInfected.all = c()
+for(i in seq(min(mod.df.all$run),max(mod.df.all$run))){
+  Run.all[i]<-RUN.all[[i]]$run
+  numInfected.all[i]<-RUN.all[[i]]$num.infected
+}
+
+infected.all <- data.frame(Run.all, numInfected.all)
+infected.all$iDur <- iDur.list 
+infected.all$R0 <- R0.list
+
+```
+```{r,echo=FALSE,fig.align='center',message=FALSE}
+#Examine values with boxplot
+ggplot(infected.all, aes(x=as.factor(iDur), y = numInfected.all,fill = as.factor(iDur)))+
+  geom_boxplot()+
+  geom_dotplot(binaxis='y', stackdir='center', dotsize=0.5)+
+  theme(legend.position = "none")+
+  ggtitle("Distribution of Number of Infected over iDur")+
+  xlab("Infected Duration(days)")+
+  ylab("Number of Infected Individuals")+theme_bw()
+
+ggplot(infected.all, aes(x=as.factor(R0),y = numInfected.all,fill=as.factor(R0)))+
+  geom_boxplot()+
+  geom_smooth(aes(group = 1))+
+  theme(legend.position = "none")+
+  xlab("R0 Value")+
+  ylab("Number of Infected Individuals")+
+  ggtitle("Distribution of Number of Infected over R0")+theme_bw()
+
+p <- ggplot(infected.all, aes(x=as.factor(R0),y= numInfected.all, fill = as.factor(iDur)))+
+  geom_bar(stat = "identity",position = position_dodge(),color="black")+
+  ggtitle("Number of Infected iDur vs R0")+
+  xlab("R0 Value")+
+  ylab("Number of Infected Individuals")
+
+p + guides(fill=guide_legend(title="iDur"))+theme_bw()
+```
+\ 
+Let us first discuss the two graphs "Distribution of Number of Infected over iDur" and "Distribution of Number of Infected over R0".  The first graph reflects what we have previously seen in regards to **i.dur** which is that is the **i.dur** value increases the total number of infected individuals appears to decrease.  The second graph provides more interesting information.  Notice that as **R0** increases the total number of infected individuals increases which is to be expected.  However, examine that this increase is not linear.  It would appear that as **R0** increases there is a greater difference in number of infected.  For example an **R0** value of 2 as compared to 1.9 has a greater difference in the total number of infected individuals than **R0** of 1.1 and 1.2.\
+
+## How does varying the number of individuals being tested effect the model
+
+The most effective way to halt a pandemic in theory would be to have every individual be in quarantine however, for Eastern this is not realistic.  The most logical sollution is to test a certain number of individuals and place the infected individuals into quarantine.  Currently eastern tests 25% of it's students every 7 days.  The goal of the following tests is to determine if there is a more optimal way to test students and if eastern can be doing anything differently to better prevent the spread of the disease.
+
+
+```{r,echo=FALSE}
+param.prop <- param.dcm(R0 = 1.5, i.dur=7,q.time=14,t.prop=.25,q.freq=7,h.rate=.0224,h.dur=14, cfr=.001,e.dur=3)
+init.prop <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0, r.num=0)
+control.prop <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod.prop<- dcm(param.prop,init.prop,control.prop)
+mod.df.prop <- as.data.frame(mod.prop)
+
+plot.prop.2 <- ggplot(data=mod.df.prop,aes(x=time))+
+  geom_line(aes(y=q.num),color="blueviolet")+
+  geom_line(aes(y=i.num),color="gold")
+plot1 <- plot.prop.2 + xlab("Time in Days")+ylab("Number of Individuals")+ggtitle("Testing 25% of students every 7 days")+theme_bw()
+
+param.prop0 <- param.dcm(R0 = 1.5, i.dur=7,q.time=14,t.prop=0,q.freq=7,h.rate=.0224,h.dur=14,
+cfr=.001,e.dur=3)
+init.prop0 <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0, r.num=0)
+control.prop0 <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod.prop0<- dcm(param.prop0,init.prop0,control.prop0)
+mod.df.prop0 <- as.data.frame(mod.prop0)
+
+plot.prop.20 <- ggplot(data=mod.df.prop0,aes(x=time))+
+  geom_line(aes(y=q.num),color="blueviolet")+
+  geom_line(aes(y=i.num),color="gold")
+plot2 <- plot.prop.20 + xlab("Time in Days")+ylab("Number of Individuals")+ggtitle("Testing 0% of Students ")+theme_bw()
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+<br>
+The above two graphs display the differences in **i.num** by testing 25% of students every 7 days compared to testing 0% of students. Based on the graphs it would appear that ECSUs testing is succeeding in preventing infections.  With ECSUs current strategy the maximum number of infected individuals at a given time is roughly 18 which is seen at day 100.  Additionally, we see a drop in the number of infected individuals every 7 days as individuals who test positive are placed into quarantine.  Based on the second graph if Eastern were to not test anyone we see that the number of infected individuals increases over 100 days without dropping each week.  It appears that without testing the model will reach a maximum of 30 individuals at a given day.  We will go over more specific infection numbers later on in this report to better compare both graphs. Let us first examine if there appears to be a difference in the number of infected individuals if we split up the 25% over the week. \ 
+
+```{r,echo = FALSE}
+t.propList <- c(.0357,.0713,.107,.143,.179,.214,.25)
+q.freqList <- c(1,2,3,4,5,6,7)
+
+param.vary <- param.dcm(R0 = 1.5, i.dur=7,q.time=14,t.prop= t.propList,q.freq= q.freqList,h.rate=.0224,h.dur=14,
+cfr=.001,e.dur=3)
+init.vary <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0, r.num=0)
+control.vary <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod.vary<- dcm(param.vary,init.vary,control.vary)
+mod.df.vary <- as.data.frame(mod.vary)
+```
+```{r,echo = FALSE, include= FALSE}
+#Split runs calulate num.infected 
+RUN.vary <- split(mod.df.vary,mod.df.vary$run)
+
+for(i in seq(min(mod.df.vary$run),max(mod.df.vary$run))){
+  RUN.vary[[i]] <- tail(RUN.vary[[i]],n=1)
+  num.infected <- RUN.vary[[i]]$i.num + RUN.vary[[i]]$q.num + RUN.vary[[i]]$h.num + RUN.vary[[i]]$f.num + RUN.vary[[i]]$r.num
+  RUN.vary[[i]]$num.infected <- num.infected
+  num.infected <- 0
+}
+
+Run.vary = c()
+numInfected.vary = c()
+for(i in seq(min(mod.df.vary$run),max(mod.df.vary$run))){
+  Run.vary[i]<-RUN.vary[[i]]$run
+  numInfected.vary[i]<-RUN.vary[[i]]$num.infected
+}
+
+infected.vary <- data.frame(Run.vary, numInfected.vary)
+```
+
+```{r,echo=FALSE}
+
+p.vary <- ggplot(infected.vary, aes(x=as.factor(Run.vary),y= numInfected.vary,fill=as.factor(Run.vary)))+
+  geom_bar(stat = "identity",position = position_dodge(),color="black")+
+  ggtitle("Number of Infected Testing Scenarios(25% total each week)")+
+  xlab("Run Number")+
+  ylab("Number of Infected Individuals")
+
+p.vary + scale_fill_discrete(name="Testing Frequency",labels=c("Test every Day","Test every other day","Test every 3 Days","Test every 4 Days","Test every 5 Days", "Test every 6 Days","Test once a week"))+theme_bw()
+```
+
+Notice that there does not appear to be any difference if we split up the testing percentage over the week.  Note that in this test 25% of individuals are tested every week but the frequency of testing is divided throughout the week. It would appear that there is no difference in the total number of infections which is good for Eastern.  Having to test only once a week as opposed to testing every day lowers the number of individuals needed to administrate tests as well as lowers resources because we won't need someone on campus to test every day.  Next we will experiment with other testing scenarios in order to determine if there is a more optimal testing setup. \ 
+
+## Other Testing Options
+
+In order to find the most optimal testing scenario we need to choose the most likely testing percentages and frequencies in order to compare which is best.  Eastern currently tests 25% of it's students every 7 days but is there a better option? Let us compare this to the following testing setups:
+
+* 5% of students every day
+* 10% of students every 2 days
+* 20% of students every 4 days
+* 30% of students every 6 days
+* 40% of students every 8 days
+* 50% of students every 10 days
+
+Note that there are other factors that need to be taken into account when it comes to testing.  Such as resources or individuals needed.  The above options are just some examples to look at how the number of infections changes based off different testing frequencies and percentages.  Because of this the new options presented are not necessarily better or worse for ECSU.
+<br>
+```{r,echo = FALSE}
+t.propList <- c(.05,.10,.20,.30,.40,.50,.25,.10,.0)
+q.freqList <- c(1,2,4,6,8,10,7,7,1)
+
+param.vary <- param.dcm(R0 = 1.5, i.dur=7,q.time=14,t.prop= t.propList,q.freq= q.freqList,h.rate=.0224,h.dur=14,
+cfr=.001,e.dur=3)
+init.vary <- init.dcm(s.num = 1595, e.num=5,i.num=0,q.num=0,h.num=0,f.num=0, r.num=0)
+control.vary <- control.dcm(nsteps=100,dt=1, new.mod = SEIQHFR)
+mod.vary<- dcm(param.vary,init.vary,control.vary)
+mod.df.vary <- as.data.frame(mod.vary)
+
+InfectedNum <- ggplot(data=mod.df.vary,aes(x=time,y=i.num,group = run))+
+  geom_line(aes(color = as.factor(run)))+
+  ggtitle("Testing Setup Impact on Infected")+
+  xlab("time")+
+  ylab("Number of Infected Individuals")+theme_bw()
+
+plot3 <- InfectedNum + scale_color_discrete(name="Testing Setup",labels=c("5%, 1 Day","10% 2 Days","20% 4 Days","30% 6 Days","40% 8 Days", "50% 10 Days","25% 7 Days","10% 7 Days","0%"))+theme_bw()
+
+QuarNum <- ggplot(data=mod.df.vary,aes(x=time,y=q.num,group = run))+
+  geom_line(aes(color = as.factor(run)))+
+  ggtitle("Testing Setup Impact on Quarantined")+
+  xlab("time")+
+  ylab("Number of Infected Individuals")+theme_bw()
+
+plot4 <- QuarNum + scale_color_discrete(name="Testing Setup",labels=c("5%, 1 Day","10% 2 Days","20% 4 Days","30% 6 Days","40% 8 Days", "50% 10 Days","25% 7 Days","10% 7 Days","0%"))+theme_bw()
+
+grid.arrange(plot3,plot4,ncol=2)
+
+```
+<br>
+The above two graphs show how **i.num** and **q.num** behave over the 100 days wuth the different testing setups.  In the first graph **i.num** seems to increase faster for "25% 7 days" than the other testing setups.  On the other hand "25% 7 Days" seems to have lower values for q.num throughout the 100 days.  Aside from "10% 7 days" **q.num** and **i.num** seem to behave similar for the other testing setups.  The main difference being the drops in the number of individuals in each compartment.
+
+We are more interested in examining how the total number of infected changes for each run 
+```{r,echo=FALSE,include=FALSE}
+#Split runs calulate num.infected 
+RUN.vary <- split(mod.df.vary,mod.df.vary$run)
+
+for(i in seq(min(mod.df.vary$run),max(mod.df.vary$run))){
+  RUN.vary[[i]] <- tail(RUN.vary[[i]],n=1)
+  num.infected <- RUN.vary[[i]]$i.num + RUN.vary[[i]]$q.num + RUN.vary[[i]]$h.num + RUN.vary[[i]]$f.num + RUN.vary[[i]]$r.num
+  RUN.vary[[i]]$num.infected <- num.infected
+  num.infected <- 0
+}
+
+Run.vary = c()
+numInfected.vary = c()
+for(i in seq(min(mod.df.vary$run),max(mod.df.vary$run))){
+  Run.vary[i]<-RUN.vary[[i]]$run
+  numInfected.vary[i]<-RUN.vary[[i]]$num.infected
+}
+
+infected.vary <- data.frame(Run.vary, numInfected.vary)
+```
+```{r,echo=FALSE}
+
+p.vary <- ggplot(infected.vary, aes(x=as.factor(Run.vary),y= numInfected.vary,fill=as.factor(Run.vary)))+
+  geom_bar(stat = "identity",position = position_dodge(),color="black")+
+  ggtitle("Number of Infected Testing Scenarios")+
+  xlab("Run Number")+
+  ylab("Number of Infected Individuals")+
+  geom_text(aes(label=round(numInfected.vary,digits=2)), vjust=1.6, color="black",
+            position = position_dodge(0.9), size=2.5)
+p.vary + scale_fill_discrete(name="Testing Setup",labels=c("5%, 1 Day","10% 2 Days","20% 4 Days","30% 6 Days","40% 8 Days", "50% 10 Days","25% 7 Days","10% 7 Days","0%"))+theme_bw()
+```
+
+The above graph gives a good indication as to how eastern can improve their testing.  Note that Eastern is already theoretically preventing almost 80 infections with their current testing.  However, this can be improved.  Any of the provided solutions seem to prevent almost the same number of infections and all prevent roughly 25 more infections than what eastern is currently doing.  Note that ECSU used to test 10% of their students every 7 days.  Our model indicates that Easterns current solution works much better.  Based on our parameters Eastern is theoretically preventing roughly 45 infections.
+
+# Conclusion
+
+In this report we presented topic of a SEIQHFR model in order to model Covid-19 at ECSU. Based off our testing **R0** is the most important parameter when it comes to increasing or decreasing the number of infections.  Additionally Easterns current strategy of testing 25% of students every week prevents a large number of infections when compared to previous testing scenarios.  It is important to note that the model results are an estimate and do not represent actual infection numbers.  Our model is reliant on defined parameters and at this point in time we can only give an educated guess as to what these values might be.  Further testing on Covid-19 can help to better define parameters in order to give more accurate results. While this model was used to test Covid-19 it can be applied to any disease as long as parameters and equations are defined.  Finally, this model was a first iteration and further testing will likely allow us to produce a more advanced and improved model.
+
+# References
+  [1] Basic DCMs with EpiModel. (2015). Statnet.org. <br>
+  http://statnet.org/tut/BasicDCMs.html <br>
+  [2] New DCMs with EpiModel. (2015). Statnet.org. <br>  
+  http://statnet.org/tut/NewDCMs.html <br>
+  [3]Modelling infectious disease outbreaks » Chebfun. (2014). Chebfun.org. <br> 
+  https://www.chebfun.org/examples/ode-nonlin/ModellingDiseases.html 
+
